@@ -2,7 +2,7 @@
 *
 *  MIT License
 *
-*  Copyright (c) 2023-2025 awawa-dev
+*  Copyright (c) 2023-2026 awawa-dev
 *
 *  https://github.com/awawa-dev/HyperSerialPico
 *
@@ -29,7 +29,7 @@
 #define MAIN_H
 
 #define MAX_BUFFER (3013 * 3 + 1)
-#define HELLO_MESSAGE "\r\nWelcome!\r\nAwa driver 9.\r\n"
+#define HELLO_MESSAGE "\r\nWelcome!\r\nAwa driver 11.\r\n"
 
 #include "calibration.h"
 #include "statistics.h"
@@ -73,7 +73,6 @@ void processData()
 		if (base.queueCurrent >= MAX_BUFFER)
 		{
 			base.queueCurrent = 0;
-			yield();
 		}
 
 		switch (frameState.getState())
@@ -81,6 +80,7 @@ void processData()
 		case AwaProtocol::HEADER_A:
 			// assume it's protocol version 1, verify it later
 			frameState.setProtocolVersion2(false);
+			frameState.setProtocolVersion3(false);			
 			if (input == 'A')
 				frameState.setState(AwaProtocol::HEADER_w);
 			break;
@@ -88,6 +88,20 @@ void processData()
 		case AwaProtocol::HEADER_w:
 			if (input == 'w')
 				frameState.setState(AwaProtocol::HEADER_a);
+#if defined(NEOPIXEL_RGBW) || defined(SPILED_APA102)
+			else if (input == 'W')
+				frameState.setState(AwaProtocol::HEADER_W);
+#endif
+			else
+				frameState.setState(AwaProtocol::HEADER_A);
+			break;
+		case AwaProtocol::HEADER_W:
+			// detect protocol version 3
+			if (input == 'a')			
+			{
+				frameState.setState(AwaProtocol::HEADER_HI);
+				frameState.setProtocolVersion3(true);
+			}				
 			else
 				frameState.setState(AwaProtocol::HEADER_A);
 			break;
@@ -136,17 +150,20 @@ void processData()
 			}
 			else if (frameState.getCount() ==  0x2aa2 && (input == 0x15 || input == 0x35))
 			{
-				statistics.print(currentTime, base.processDataHandle, base.processSerialHandle);
-
-				if (input == 0x15)
-					printf(HELLO_MESSAGE);
+				statistics.print(currentTime, input == 0x15);
 
 				frameState.setRegroup(true);
 
-				delay(10);
-
 				currentTime = millis();
-				statistics.reset(currentTime);
+				if (input == 0x15)
+				{					
+					statistics.reset(currentTime);
+				}
+				else
+				{
+					statistics.lightReset(currentTime, true);
+				}
+
 				frameState.setState(AwaProtocol::HEADER_A);
 			}
 			else
@@ -167,9 +184,37 @@ void processData()
 			frameState.setState(AwaProtocol::BLUE);
 			break;
 
+		case AwaProtocol::EXTRA_COLOR_BYTE_4:
+			#ifdef NEOPIXEL_RGBW
+				frameState.color.W = input;
+			#elif defined(SPILED_APA102)
+				frameState.color.Brightness = input;
+			#endif
+			frameState.addFletcher(input);
+
+			if (base.setStripPixel(frameState.getCurrentLedIndex(), frameState.color))
+			{
+				frameState.setState(AwaProtocol::RED);
+			}
+			else
+			{
+				frameState.setState(AwaProtocol::FLETCHER1);
+			}
+			break;			
+
 		case AwaProtocol::BLUE:
 			frameState.color.B = input;
 			frameState.addFletcher(input);
+
+			if (frameState.isProtocolVersion3())
+			{
+				frameState.setState(AwaProtocol::EXTRA_COLOR_BYTE_4);
+				break;
+			}
+
+			#if defined(SPILED_APA102)
+				frameState.color.Brightness = 0xFF;
+			#endif
 
 			#ifdef NEOPIXEL_RGBW
 				// calculate RGBW from RGB using provided calibration data
@@ -254,8 +299,6 @@ void processData()
 				currentTime = millis();
 				deltaTime = currentTime - statistics.getStartTime();
 				updateMainStatistics(currentTime, deltaTime, true);
-
-				yield();
 			}
 
 			frameState.setState(AwaProtocol::HEADER_A);
